@@ -1,62 +1,103 @@
+{-# LANGUAGE InstanceSigs #-}
+import Control.Applicative
+import Control.Monad (liftM, ap)
+import qualified Data.Map.Strict as Map
+import Data.Maybe
 
-data Exp = Constant Int | Variable String
-| Minus Exp Exp
-| Greater Exp Exp | Times Exp Exp deriving Show
+fromBool :: Bool -> Int
+fromBool False = 0
+fromBool True = 1
 
-data Com = Assign String Exp | Seq Com Com
-| Cond Exp Com Com
-| While Exp Com
-| Declare String Exp Com | Print Exp
-deriving Show
+data Exp = Constant Int | Variable String | Minus Exp Exp | Greater Exp Exp | Times Exp Exp deriving Show
 
-type Location = Int 
-type Index = [ String ] 
-type Stack = [Int]
+data Com = Assign String Exp | Seq Com Com | Cond Exp Com Com | While Exp Com | Declare String Exp Com | Print Exp deriving Show
 
-position :: String −> Index −> Location
-position name index = 
-    let pos n (nm:nms) = 
-        if name == nm 
-        then n
-        else pos (n+1) nms in pos 1 index
+type Identifier = String
+type Value = Int
+type Stack = Map.Map Identifier Value
 
+type Output = String
+newtype M a = StateOutput (Stack -> (Stack, Output, a))
 
-fetch :: Location −> Stack −> Int
-fetch n (v:vs) = if n == 1 the v else fetch (n−1) vs
+unStateOutput :: M a -> (Stack -> (Stack, Output, a))
+unStateOutput (StateOutput f) = f
 
-put :: Location −> Int −> Stack −> Stack
+instance Monad M where
+    (>>=) :: M a -> (a -> M b) -> M b
+    m >>= f = StateOutput (\s -> let (s1, o1, a1) = (unStateOutput m) s
+                                     (s2, o2, a2) = unStateOutput (f a1) s1
+                                 in (s2, o1 ++ o2, a2))
+    return :: a -> M a
+    return x = StateOutput (\s -> (s, "", x))
+  
+instance Applicative M where
+    pure  = return
+    (<*>) = ap
 
-newtype M a = StOut (Stack −> (a, Stack, String))
+instance Functor M where
+    fmap = liftM
 
---instance Monad M where
+var :: Identifier -> M Value
+var id = StateOutput (\stack -> (stack, "", fromJust (Map.lookup id stack)))
 
+eval :: Exp -> M Value
+eval exp = case exp of
+    Constant n -> return n
+    Variable x -> var x
+    Minus x y -> do
+        a <- eval x
+        b <- eval y
+        return (a - b)
+    Greater x y -> do
+        a <- eval x
+        b <- eval y
+        return $ fromBool (a > b)
+    Times x y -> do
+        a <- eval x
+        b <- eval y
+        return (a * b)
 
-unStOut :: ( StOut f ) -> f
+f = unStateOutput (eval e) s
+    where e = Minus (Constant 1) (Constant 2)
+          s = Map.empty
+          
+assign :: Identifier -> Value -> M ()
+assign id val = StateOutput (\stack -> (Map.adjust (\_ -> val) id stack, "", ()))
 
-getfrom :: Location −> M Int
+declare :: Identifier -> Value -> M ()
+declare id val = StateOutput (\stack -> (Map.insert id val stack, "", ()))
 
-write :: Location −> Int −> M ()
+destroy :: Identifier -> M ()
+destroy id = StateOutput (\stack -> (Map.delete id stack, "", ()))
 
-push :: Int−> M ()
+output :: Show a => a -> M ()
+output v = StateOutput (\n -> (n, show v, ()))
 
-eval1 :: Exp−> Index−>MInt eval1 exp index = case exp of
-    Constant n −> return n
-    Variable x −>let loc = position x index
-    in getfrom loc
-    -- incompleta
-
-exec :: Com −> Index −> M () 
-exec stmt index = case stmt of
-    Assign name e −> let loc = position name index in do
-        { v <−eval1 e index;
-        write loc v } 
-    Seq s1 s2 −> do 
-        { x <− exec s1 index; y <− exec s2 index;
-        return () }
-    Declare nm e stmt −> do 
-        { v <− eval1 e index; push v;
-        exec stmt (nm:index); pop }
--- incompleta
-
-output :: Show a => a −> M ()
-output v = StOut (\n −> ((), n, show v))
+exec :: Com -> M () 
+exec stmt = case stmt of
+    Assign id val -> do
+        v <- eval val
+        assign id v
+    Seq s1 s2 -> do
+        exec s1
+        exec s2
+    Declare id exp s -> do
+        v <- eval exp
+        declare id v
+        exec s
+        destroy id
+    Cond exp s1 s2 -> do
+        v <- eval exp
+        if v == 1
+            then exec s1
+            else exec s2
+    a@(While exp s) -> do
+        v <- eval exp
+        if v == 0
+            then return ()
+            else do
+                exec s
+                exec a
+    Print exp -> do
+        v <- eval exp
+        output exp
