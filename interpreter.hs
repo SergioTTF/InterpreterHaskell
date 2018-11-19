@@ -1,4 +1,5 @@
-{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE InstanceSigs, TupleSections #-}
+
 import Control.Applicative
 import Control.Monad (liftM, ap)
 import qualified Data.Map.Strict as Map
@@ -24,11 +25,11 @@ unStateOutput (StateOutput f) = f
 
 instance Monad M where
     (>>=) :: M a -> (a -> M b) -> M b
-    m >>= f = StateOutput (\s -> let (s1, o1, a1) = (unStateOutput m) s
+    m >>= f = StateOutput (\s -> let (s1, o1, a1) = unStateOutput m s
                                      (s2, o2, a2) = unStateOutput (f a1) s1
                                  in (s2, o1 ++ o2, a2))
     return :: a -> M a
-    return x = StateOutput (\s -> (s, "", x))
+    return x = StateOutput (, "", x)
   
 instance Applicative M where
     pure  = return
@@ -62,7 +63,7 @@ f = unStateOutput (eval e) s
           s = Map.empty
           
 assign :: Identifier -> Value -> M ()
-assign id val = StateOutput (\stack -> (Map.adjust (\_ -> val) id stack, "", ()))
+assign id val = StateOutput (\stack -> (Map.adjust (const val) id stack, "", ()))
 
 declare :: Identifier -> Value -> M ()
 declare id val = StateOutput (\stack -> (Map.insert id val stack, "", ()))
@@ -71,7 +72,7 @@ destroy :: Identifier -> M ()
 destroy id = StateOutput (\stack -> (Map.delete id stack, "", ()))
 
 output :: Show a => a -> M ()
-output v = StateOutput (\n -> (n, show v, ()))
+output v = StateOutput (, show v, ())
 
 exec :: Com -> M () 
 exec stmt = case stmt of
