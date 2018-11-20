@@ -1,10 +1,11 @@
 {-# LANGUAGE InstanceSigs, LambdaCase, TupleSections #-}
 
+import Control.Applicative (Alternative, empty, (<|>))
 import Control.Monad
-import qualified Control.Applicative as Applicative
+import Data.Char
 import qualified Data.Map.Strict as Map
 import Data.Maybe
-import Data.Char
+import Text.ParserCombinators.ReadP
 
 fromBool :: Bool -> Int
 fromBool False = 0
@@ -102,117 +103,38 @@ exec stmt = case stmt of
         exec s1
         exec s2
 
-newtype Parser a = Parser {
-        parse :: String -> [(a, String)]
-}
-
-instance Monad Parser where
-    return a = Parser (\cs -> [(a, cs)]) 
-    p >>= f  = Parser (\cs -> concat [parse (f a) cs' | (a, cs') <- parse p cs])
-
-instance Applicative Parser where
-    pure  = return
-    (<*>) = ap
-
-instance Functor Parser where
-    fmap = liftM
-
-instance Applicative.Alternative Parser where
-    (<|>) = mplus
-    empty = mzero 
-
-item :: Parser Char
-item = Parser (\case
-    "" -> []
-    (c : cs) -> [(c, cs)])
-
-instance MonadPlus Parser where
-    mzero       = Parser (const [])
-    p `mplus` q = Parser (\cs -> parse p cs ++ parse q cs)
-
-(+++) :: Parser a -> Parser a -> Parser a
-p +++ q = Parser (\cs -> case parse (p `mplus` q) cs of
-    [] -> []
-    (x : xs) -> [x])
-
-sat :: (Char -> Bool) -> Parser Char
-sat p = do
-    c <- item
-    if p c
-        then return c
-        else mzero
-
-(?) :: Parser a -> (a -> Bool) -> Parser a
-p ? test = do
-    b <- p
-    if test b
-        then return b
-        else mzero
-
-char :: Char -> Parser Char
-char c = sat (c ==)
-
-string :: String -> Parser String
-string "" = return ""
-string s@(c : cs) = do
-    char c
-    string cs
-    return s
-
-many :: Parser a -> Parser [a]
-many p = many' p +++ return []
-    where many' p = do { c <- p
-                       ; cs <- many p
-                       ; return (c : cs) }
-
-space :: Parser String
-space = many (sat isSpace)
-
-token :: Parser a -> Parser a
+token :: ReadP a -> ReadP a
 token p = do
     a <- p
-    space
+    skipSpaces
     return a
 
-symbol :: String -> Parser String
+symbol :: String -> ReadP String
 symbol cs = token (string cs)
 
-apply :: Parser a -> String -> [(a,String)]
-apply p = parse (do
-    space
-    p)
+apply :: ReadP a -> String -> [(a, String)]
+apply p = readP_to_S $ do
+    skipSpaces
+    p
 
-ident :: Parser String
+ident :: ReadP String
 ident = do
-    c <- sat isAlpha
-    cs <- many (sat (\a -> isAlpha a || isDigit a))
+    c <- satisfy isAlpha
+    cs <- many (satisfy (\a -> isAlpha a || isDigit a))
     return (c : cs)
 
-identif :: Parser String
+identif :: ReadP String
 identif = token ident
 
-var :: Parser Exp
+var :: ReadP Exp
 var = Variable <$> identif
 
-chainl :: Parser a -> Parser (a -> a -> a) -> a -> Parser a
-chainl p op a = (p `chainl'` op) +++ return a
-
-chainl' :: Parser a -> Parser (a -> a -> a) -> Parser a
-p `chainl'` op = do
-    a <- p
-    rest a
-    where
-        rest a = (do
-            f <- op
-            b <-p
-            rest (f a b)) +++ return a
-
-digit :: Parser Exp
+digit :: ReadP Exp
 digit = do
-    x <- token (sat isDigit)
+    x <- token (satisfy isDigit)
     return (Constant (ord x - ord '0'))
 
-digiti :: Parser Exp
+digiti :: ReadP Exp
 digiti = do
     p <- digit
     l <- many digit
@@ -220,37 +142,37 @@ digiti = do
                                Constant b' = b
                             in Constant (10 * a' + b')) (Constant 0) (p : l))
 
-rexp :: Parser Exp
-rexp = expr `chainl'` relop
+rexp :: ReadP Exp
+rexp = chainl1 expr relop
 
-expr :: Parser Exp
-expr = term `chainl'` addop
+expr :: ReadP Exp
+expr = chainl1 term addop
 
-term :: Parser Exp
-term = factor `chainl'` mulop
+term :: ReadP Exp
+term = chainl1 factor mulop
 
-factor :: Parser Exp
+factor :: ReadP Exp
 factor = var +++ digiti +++ do
     symbol "("
     n <- rexp
     symbol ")"
     return n
 
-addop :: Parser (Exp -> Exp -> Exp)
+addop :: ReadP (Exp -> Exp -> Exp)
 addop = do
     symbol "-"
     return Minus +++ do
         symbol "+"
         return Plus
 
-mulop :: Parser (Exp -> Exp -> Exp)
+mulop :: ReadP (Exp -> Exp -> Exp)
 mulop = do
     symbol "*"
     return Times +++ do
         symbol "/"
         return Div
 
-relop :: Parser (Exp -> Exp -> Exp)
+relop :: ReadP (Exp -> Exp -> Exp)
 relop = do
     symbol ">"
     return Greater +++ do
@@ -259,18 +181,18 @@ relop = do
             symbol "="
             return Equal
   
-printe :: Parser Com
+printe :: ReadP Com
 printe = do
     symbol "print"
     Print <$> rexp
 
-assign :: Parser Com
+assign :: ReadP Com
 assign = do
     x <- identif
     symbol ":="
     Assign x <$> rexp
 
-seqv :: Parser Com
+seqv :: ReadP Com
 seqv = do
     symbol "{"
     c <- com
@@ -279,7 +201,7 @@ seqv = do
     symbol "}"
     return (Seq c d)
 
-cond :: Parser Com
+cond :: ReadP Com
 cond = do
     symbol "if"
     e <- rexp
@@ -288,14 +210,14 @@ cond = do
     symbol "else"
     Cond e c <$> com
 
-while :: Parser Com
+while :: ReadP Com
 while = do
     symbol "while"
     e <- rexp
     symbol "do"
     While e <$> com
 
-declare :: Parser Com
+declare :: ReadP Com
 declare = do
     symbol "declare"
     x <- identif
@@ -304,7 +226,7 @@ declare = do
     symbol "in"
     Declare x e <$> com
 
-com :: Parser Com
+com :: ReadP Com
 com = assign +++ seqv +++ cond +++ while +++ declare +++ printe
 
 s :: Com
@@ -320,5 +242,7 @@ s = Declare "x" (Constant 150) $
         )
         (Print (Variable "y"))
 
+s' = apply com "declare x = 150 in\n declare y = 200 in\n {while x > 0 do { x:=x-1; y:=y-1 };\n print y\n }\ndeclare x = 150 in\n declare y = 200 in\n {while x > 0 do { x:=x-1; y:=y-1 };\n print y\n }\n"
+
 test :: (Stack, Output, ())
-test = interpret (exec $ fst $ head $ parse com "declare x = 150 in\n declare y = 200 in\n {while x > 0 do { x:=x-1; y:=y-1 };\n print y\n }\ndeclare x = 150 in\n declare y = 200 in\n {while x > 0 do { x:=x-1; y:=y-1 };\n print y\n }\n") Map.empty
+test = interpret (exec $ fst $ head s') Map.empty
